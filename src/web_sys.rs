@@ -73,6 +73,9 @@ pub struct Context {
     buffers: TrackedResource<WebBufferKey, WebGlBuffer>,
     vertex_arrays: TrackedResource<WebVertexArrayKey, WebGlVertexArrayObject>,
     textures: TrackedResource<WebTextureKey, WebGlTexture>,
+    // Texture keys whose underlying handle is owned by the caller.
+    // We drop the slot but skip `gl.deleteTexture` in `delete_texture`.
+    external_textures: RefCell<HashSet<WebTextureKey>>,
     samplers: TrackedResource<WebSamplerKey, WebGlSampler>,
     fences: TrackedResource<WebFenceKey, WebGlSync>,
     framebuffers: TrackedResource<WebFramebufferKey, WebGlFramebuffer>,
@@ -269,6 +272,7 @@ impl Context {
             buffers: tracked_resource(),
             vertex_arrays: tracked_resource(),
             textures: tracked_resource(),
+            external_textures: RefCell::new(HashSet::new()),
             samplers: tracked_resource(),
             fences: tracked_resource(),
             framebuffers: tracked_resource(),
@@ -301,6 +305,7 @@ impl Context {
             buffers: tracked_resource(),
             vertex_arrays: tracked_resource(),
             textures: tracked_resource(),
+            external_textures: RefCell::new(HashSet::new()),
             samplers: tracked_resource(),
             fences: tracked_resource(),
             framebuffers: tracked_resource(),
@@ -1532,6 +1537,34 @@ impl Context {
         if let Some(ext) = &self.extensions.webgl_lose_context {
             ext.restore_context()
         }
+    }
+
+    /// Register an externally-owned `WebGlTexture` and return a glow
+    /// [`Texture`] key that refers to it.
+    ///
+    /// The caller retains ownership of the underlying handle: when the key
+    /// is passed to [`HasContext::delete_texture`] glow drops its slot but
+    /// does *not* call `gl.deleteTexture`. The caller is responsible for
+    /// keeping the handle alive for as long as glow may use the key, and
+    /// for releasing it afterwards.
+    ///
+    /// # Safety
+    /// The handle must come from the same `WebGl[2]RenderingContext` this
+    /// glow `Context` wraps and must remain valid for the lifetime of the
+    /// returned key.
+    pub unsafe fn register_external_texture(&self, handle: WebGlTexture) -> WebTextureKey {
+        let key = self.textures.borrow_mut().insert(handle);
+        self.external_textures.borrow_mut().insert(key);
+        key
+    }
+
+    /// Borrow the underlying `WebGlTexture` for a glow [`Texture`] key.
+    ///
+    /// Returns `None` if the key is dead. Works for both
+    /// [`HasContext::create_texture`]-allocated keys and keys produced by
+    /// [`Self::register_external_texture`].
+    pub fn as_web_gl_texture(&self, key: WebTextureKey) -> Option<WebGlTexture> {
+        self.textures.borrow().get(key).cloned()
     }
 
     unsafe fn get_parameter_gl_name<TKey, TResource>(
@@ -3072,11 +3105,15 @@ impl HasContext for Context {
     }
 
     unsafe fn delete_texture(&self, texture: Self::Texture) {
+        let was_external = self.external_textures.borrow_mut().remove(&texture);
         let mut textures = self.textures.borrow_mut();
         if let Some(ref t) = textures.remove(texture) {
-            match self.raw {
-                RawRenderingContext::WebGl1(ref gl) => gl.delete_texture(Some(t)),
-                RawRenderingContext::WebGl2(ref gl) => gl.delete_texture(Some(t)),
+            // Externally-owned handles: drop the slot, leave the WebGL object alone.
+            if !was_external {
+                match self.raw {
+                    RawRenderingContext::WebGl1(ref gl) => gl.delete_texture(Some(t)),
+                    RawRenderingContext::WebGl2(ref gl) => gl.delete_texture(Some(t)),
+                }
             }
         }
     }
