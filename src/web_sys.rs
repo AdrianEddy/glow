@@ -1563,10 +1563,8 @@ impl Context {
     /// Register an externally-created `WebGlTexture` and return a glow
     /// [`Texture`] key that refers to it.
     ///
-    /// Mirrors `wgpu_hal::gles::Device::texture_from_raw`:
     /// - `None` - glow takes ownership of the handle and calls
-    ///   `gl.deleteTexture` when the key is passed to
-    ///   [`HasContext::delete_texture`].
+    ///   `gl.deleteTexture` when the handle is no longer in use.
     /// - `Some(cb)` - the caller retains ownership. Glow drops its slot
     ///   without calling `gl.deleteTexture` and invokes `cb` to signal
     ///   that the handle is no longer in use. The callback also fires if
